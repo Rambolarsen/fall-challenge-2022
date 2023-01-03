@@ -8,6 +8,7 @@ using System.Drawing;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Principal;
 using static Player;
+using System.Diagnostics;
 
 /**
  * Auto-generated code below aims at helping you parse
@@ -23,15 +24,19 @@ class Player
         int height = int.Parse(inputs[1]);
         var center = new Point(width/ 2, height / 2);
 
+        var gameManager = new GameManager(width, height, center);
         Console.Error.WriteLine("width: " + width);
         Console.Error.WriteLine("height: " + height);
+        Stopwatch sw = new Stopwatch();
         // game loop
         while (true)
         {
+
             inputs = Console.ReadLine()?.Split(' ') ?? Array.Empty<string>();
-                        
-            int myMatter = int.Parse(inputs[0]);
-            int oppMatter = int.Parse(inputs[1]);
+            sw.Restart();
+            gameManager.MyMatter = int.Parse(inputs[0]);
+            gameManager.OpponentsMatter = int.Parse(inputs[1]);
+
             var tiles = new List<Tile>();
             for (int y = 0; y < height; y++)
             {
@@ -47,50 +52,53 @@ class Player
             // To debug: Console.Error.WriteLine("Debug messages...");
 
             var tileManager = new TileManager(tiles);
+            gameManager.Update(tileManager);
+
             var commands = new List<string>();
-            foreach (var tile in tiles)
+
+            foreach (var tile in tileManager.MyTiles)
             {
-                //if (tile.CanBuild && !tile.InRangeOfRecycler && tileManager.GetScrapValue(tile) > 10)
-                //{
-                //    commands.Add($"BUILD {tile.Coordinates.X} {tile.Coordinates.Y}");
-                //    tile.CanBuild = false;
-                //    tile.InRangeOfRecycler = true;
-                //    break;
-                //}
                 
-                if (tileManager.IsMyClosestTileToCenter(tile, center) && tile.CanSpawn && myMatter >= 50 && ((tile.InRangeOfRecycler && tile.ScrapAmount > 1) || !tile.InRangeOfRecycler))
+                //if more than one enemy tile nearby, place recycler
+                if (tile.CanBuild && tileManager.EnemyTilesNearby(tile) && !tile.InRangeOfRecycler && gameManager.MyMatter >= 10)
                 {
-                    var botsToSpawn = (int)(Math.Floor((decimal)(myMatter / 10)));
+                    commands.Add($"BUILD {tile.Coordinates.X} {tile.Coordinates.Y}");
+                    tile.CanBuild = false;
+                    tile.CanSpawn = false;
+                    tile.InRangeOfRecycler = true;
+                    gameManager.MyMatter -= 10;
+                }
+
+                if (tileManager.IsMyClosestTileToCenter(tile, center) && gameManager.MyMatter >= 10 && tile.CanSpawn)
+                {
+                    var botsToSpawn = (int)(Math.Floor((decimal)(gameManager.MyMatter / 10)));
                     commands.Add($"SPAWN {botsToSpawn} {tile.Coordinates.X} {tile.Coordinates.Y}");
                     tile.CanSpawn = false;
-                    myMatter -= (botsToSpawn * 10);
+                    gameManager.MyMatter -= (botsToSpawn * 10);
                 }
+
                 //I own tile and have units on it
-                else if (tile.Owner == Owner.Me && tile.UnitCount > 0)
+                if (tile.UnitCount > 0)
                 {
                     for (int i = 0; i < tile.UnitCount; i++)
                     {
                         var closestEmptyTile = tileManager.GetClosestEmptyTile(tile);
-                        Console.Error.WriteLine($"{closestEmptyTile?.Coordinates.X}-{closestEmptyTile?.Coordinates.Y}, Incoming bots {closestEmptyTile?.IncomingBots ?? 0}");
                         //if noone near to take over, move to center
                         if (closestEmptyTile != null)
                         {
                             commands.Add($"MOVE 1 {tile.Coordinates.X} {tile.Coordinates.Y} {closestEmptyTile.Coordinates.X} {closestEmptyTile.Coordinates.Y}");
                             closestEmptyTile.IncomingBots += 1;
-                            Console.Error.WriteLine($"2! {closestEmptyTile?.Coordinates.X}-{closestEmptyTile?.Coordinates.Y}, Incoming bots {closestEmptyTile?.IncomingBots ?? 0}");
                         }
                         else
                         {
                             commands.Add($"MOVE 1 {tile.Coordinates.X} {tile.Coordinates.Y} {center.X} {center.Y}");
                         }
                     }
-
-                        
                     tile.CanBuild = false;
                 }
-
-
             }
+            sw.Stop();
+            Console.Error.WriteLine($"Total elapsed {sw.ElapsedMilliseconds}");
             //Console.Error.WriteLine(string.Join(";", commands.ToArray()));
             Console.WriteLine(string.Join(";", commands.ToArray()));
         }
@@ -165,6 +173,8 @@ class Player
 
         public ICollection<Point> CloseTiles => new List<Point> { North(), South(), East(), West() };
 
+        public ICollection<Tile> ConnectedTiles { get; set; } = new List<Tile>();
+
         public double Distance(Tile tile) => Distance(tile.Coordinates);
 
         public double Distance(Point coordinates) => Math.Sqrt(
@@ -176,11 +186,30 @@ class Player
     {
         public ICollection<Tile> Tiles { get; set; } = new List<Tile>();
 
-        public ICollection<Tile> TilesToConquer => Tiles.Where(tile => ((tile.InRangeOfRecycler && tile.ScrapAmount > 1) || !tile.InRangeOfRecycler) && tile.ScrapAmount > 0 && tile.Owner != Owner.Me).ToList();
+        public ICollection<Tile> TilesToConquer => Tiles.Where(tile => !tile.InRangeOfRecycler && tile.ScrapAmount > 0 && tile.Owner != Owner.Me).ToList();
 
-        public ICollection<Tile> MyTiles => Tiles.Where(tile => tile.CanSpawn && ((tile.InRangeOfRecycler && tile.ScrapAmount > 1) || !tile.InRangeOfRecycler)).ToList();
+        public ICollection<Tile> MyTiles => Tiles.Where(tile => tile.Owner == Owner.Me).ToList();
 
-        public TileManager(ICollection<Tile> tiles) { Tiles = tiles; }
+        public TileManager(ICollection<Tile> tiles) 
+        { 
+            Tiles = tiles;
+            ConnectTiles();
+        }
+
+        private void ConnectTiles()
+        {
+            foreach (var tile in Tiles)
+                tile.ConnectedTiles = GetNearbyTiles(tile).Where(x => x.ScrapAmount > 0).ToList();
+        }
+
+        public ICollection<Tile> GetConnectedTileCount(Tile tile, HashSet<Tile>? connectedTiles = null)
+        {
+            connectedTiles ??= new HashSet<Tile>();
+            foreach (var connectedTile in tile.ConnectedTiles)
+                if (connectedTiles.Add(connectedTile))
+                    GetConnectedTileCount(connectedTile, connectedTiles);
+            return connectedTiles.ToList();
+        }
 
         public int GetScrapValue(Tile tile)
         {
@@ -203,6 +232,59 @@ class Player
 
         public Tile? GetClosestEmptyTile(Tile tile) => TilesToConquer.OrderBy(x => x.IncomingBots).ThenBy(tile.Distance).FirstOrDefault();
 
-        public bool IsMyClosestTileToCenter(Tile tile, Point center) => tile == MyTiles.OrderBy(x => x.IncomingBots).ThenBy(x => x.Distance(center)).First();
+        public bool IsMyClosestTileToCenter(Tile tile, Point center) => tile == MyTiles.Where(x => !x.InRangeOfRecycler && x.CanSpawn && x.ConnectedTiles.Any()).OrderBy(x => x.Distance(center)).First();
+
+        public bool EnemyTilesNearby(Tile tile) => GetNearbyTiles(tile).Count(x => x.Owner == Owner.Foe) > 1;
+
+        public bool IsTileConnected(Tile tile) => GetNearbyTiles(tile).Any(x => x.ScrapAmount > 0);
+
+        public Tile? GetClosestForwardEmptyTile(Tile tile, Side side) 
+        {
+            return side switch
+            {
+                Side.Left => TilesToConquer.Where(x => x.Coordinates.X >= tile.Coordinates.X).OrderBy(x => x.IncomingBots).ThenBy(tile.Distance).FirstOrDefault(),
+                Side.Right => TilesToConquer.Where(x => x.Coordinates.X <= tile.Coordinates.X).OrderBy(x => x.IncomingBots).ThenBy(tile.Distance).FirstOrDefault(),
+                Side.Unset => throw new ArgumentException(),
+                _ => throw new ArgumentNullException(),
+            };
+        }
     }
+
+    public class GameManager
+    {
+        public GameManager() { }
+
+        public GameManager(int width, int height, Point center)
+        {
+            Width = width;
+            Height = height;
+            Center = center;
+        }
+
+        public Side Side { get; set; } = Side.Unset;
+        public int Width { get; }
+        public int Height { get; }
+        public Point Center { get; }
+        public int MyMatter { get; set; }
+        public int OpponentsMatter { get; set; }
+
+        public void Update(TileManager tileManager)
+        {
+            SetStartingSide(tileManager);
+        }
+
+        private void SetStartingSide(TileManager tileManager)
+        {
+            if (Side != Side.Unset)
+                return;
+            
+            var minimumCoordinates = tileManager.MyTiles.Min(x => x.Coordinates.X);
+            if (minimumCoordinates < Center.X)
+                Side = Side.Left;
+            else
+                Side = Side.Right;            
+        }
+    }
+
+    public enum Side { Left, Right, Unset }
 }
